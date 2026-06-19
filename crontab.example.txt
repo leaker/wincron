@@ -1,0 +1,31 @@
+# wincron sample crontab — copy to crontab.txt next to wincron.exe
+#
+# Format:  minute hour day-of-month month day-of-week  command
+# Fields use STANDARD cron semantics:
+#   minute        0-59
+#   hour          0-23
+#   day-of-month  1-31
+#   month         1-12   (or JAN-DEC)
+#   day-of-week   0-6    (0 = Sunday ... 6 = Saturday, or SUN-SAT)
+# Operators: *  ,  -  /     e.g. */5, 1-5, 0,30, MON-FRI
+#
+# Lines starting with # and blank lines are ignored.
+# The crontab is reloaded automatically when this file changes (no restart).
+
+# Every 5 minutes
+*/5 * * * * echo tick >> C:\logs\tick.txt
+
+# Every day at 02:30
+30 2 * * * C:\scripts\backup.bat
+
+# Weekdays at 09:00
+0 9 * * MON-FRI C:\scripts\report.exe --daily
+
+# Top of every hour (descriptor form)
+@hourly C:\scripts\sync.cmd
+
+# Interval form: every 90 seconds (uses Go duration syntax: s, m, h)
+@every 90s C:\scripts\heartbeat.exe
+
+# Supported descriptors: @yearly @annually @monthly @weekly @daily
+#                        @midnight @hourly  @every <duration>
