@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -144,7 +145,18 @@ func TestMissingFileKeepsSchedule(t *testing.T) {
 
 // If the crontab can be stat'd but not read (here: the path becomes a
 // directory), the previous schedule is retained and the error is logged.
+//
+// Skipped on Windows: this simulates the read error by replacing the file with
+// a directory at the same path, which is unreliable there. Windows file-system
+// tunneling restores the deleted file's timestamps to a same-named replacement
+// created within ~15s, so the manager's mtime check sees "no change" and never
+// reaches the read, making the test flaky. The read-error branch itself is
+// OS-independent (covered here on Unix), and the realistic "crontab disappears"
+// case is covered portably by TestMissingFileKeepsSchedule.
 func TestReadErrorKeepsSchedule(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("directory-as-file read-error simulation is unreliable on Windows (file-system tunneling)")
+	}
 	dir := t.TempDir()
 	path := filepath.Join(dir, "crontab.txt")
 	writeCrontab(t, path, "0 0 * * 0 echo a\n", time.Now())
