@@ -16,17 +16,23 @@ import (
 	_ "time/tzdata"
 )
 
+// version is the release version, injected at build time via
+// -ldflags "-X main.version=X.Y.Z". It stays "dev" for local builds.
+var version = "dev"
+
 func main() {
 	var (
-		logPath    string
-		reload     time.Duration
-		grace      time.Duration
-		tz         string
-		maxSizeMB  int
-		maxBackups int
-		maxAgeDays int
-		compress   bool
+		showVersion bool
+		logPath     string
+		reload      time.Duration
+		grace       time.Duration
+		tz          string
+		maxSizeMB   int
+		maxBackups  int
+		maxAgeDays  int
+		compress    bool
 	)
+	flag.BoolVar(&showVersion, "version", false, "print version and exit")
 	flag.StringVar(&logPath, "log", "", "log file path (default: <exe dir>/wincron.log)")
 	flag.DurationVar(&reload, "reload", 15*time.Second, "crontab reload poll interval")
 	flag.DurationVar(&grace, "grace", 30*time.Second, "max wait for running jobs on shutdown")
@@ -37,6 +43,11 @@ func main() {
 	flag.BoolVar(&compress, "log-compress", true, "gzip rotated log files")
 	flag.Usage = usage
 	flag.Parse()
+
+	if showVersion {
+		fmt.Printf("wincron %s\n", version)
+		return
+	}
 
 	baseDir := exeDir()
 	crontabPath := flag.Arg(0)
@@ -62,8 +73,8 @@ func main() {
 		loc = time.Local
 	}
 
-	logger.Printf("wincron starting (%s) crontab=%s log=%s tz=%s reload=%s",
-		runtime.Version(), crontabPath, logPath, loc, reload)
+	logger.Printf("wincron %s starting (%s) crontab=%s log=%s tz=%s reload=%s",
+		version, runtime.Version(), crontabPath, logPath, loc, reload)
 
 	// nssm stops a service by sending Ctrl-C (a console control event), which
 	// arrives as os.Interrupt; SIGTERM is included for non-Windows hosts.
