@@ -24,6 +24,35 @@ makes local development and testing easy; the production target is Windows
 - **Graceful shutdown** — handles the Ctrl-C that nssm sends on stop, waiting
   (bounded) for in-flight jobs to finish.
 
+## Install
+
+**Scoop (Windows):**
+
+```
+scoop bucket add leaker https://github.com/leaker/scoop-bucket
+scoop install wincron
+```
+
+`scoop update wincron` picks up new releases. Check the installed version with
+`wincron -version`.
+
+Or grab `wincron-<version>-windows-amd64.zip` from the
+[Releases](https://github.com/leaker/wincron/releases) page and extract
+`wincron.exe`. To build from source, see [Build](#build) below.
+
+After installing via Scoop, register the real binary with nssm (point at the
+versioned path under `apps`, not the shim, so the service survives `scoop
+update` cleanly):
+
+```bat
+nssm install wincron "%USERPROFILE%\scoop\apps\wincron\current\wincron.exe"
+nssm set wincron AppDirectory "C:\wincron"
+nssm set wincron AppParameters "C:\wincron\crontab.txt"
+```
+
+(`...\current\...` is a junction Scoop repoints on each update, so this path
+keeps working across upgrades.)
+
 ## Crontab format
 
 ```
