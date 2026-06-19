@@ -1,0 +1,129 @@
+# =============================================================================
+# Manual backfill: rewrite leaker/scoop-bucket's wincron.json for an existing
+# GitHub Release.
+#
+# Normal releases are handled by release.yml, which bumps the Scoop manifest
+# inline right after publishing. This workflow is an operator tool for when you
+# need to bump out of band:
+#   - re-run after rotating an expired PACKAGE_MANAGER_BUMP_TOKEN
+#   - re-seed the manifest after a hand-edit in the bucket repo
+#   - point the bucket at a release that predates release.yml
+#
+# It resolves a tag (explicit input, or the latest published release),
+# downloads that release's amd64 zip, computes its sha256, regenerates
+# bucket/wincron.json, and commits + pushes. It is idempotent: a re-run against
+# an already-bumped tag prints "nothing to push" and exits cleanly.
+#
+# Needs PACKAGE_MANAGER_BUMP_TOKEN (a PAT with write access to
+# leaker/scoop-bucket). See RELEASING.md. All event/input values flow through
+# `env:` and are dereferenced as quoted shell variables.
+# =============================================================================
+
+name: Bump Scoop manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag (e.g. v0.1.0). Defaults to the latest published release."
+        required: false
+
+permissions:
+  contents: read
+
+jobs:
+  bump:
+    name: Bump scoop-bucket
+    runs-on: ubuntu-latest
+    steps:
+      - name: Resolve release tag
+        id: meta
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          TAG="$INPUT_TAG"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --repo "${GITHUB_REPOSITORY}" --json tagName -q .tagName)
+          fi
+          VERSION="${TAG#v}"
+          {
+            echo "tag=$TAG"
+            echo "version=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved tag=$TAG version=$VERSION"
+
+      - name: Download release zip and compute sha256
+        id: sha
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.meta.outputs.tag }}
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts && cd artifacts
+          ZIP="wincron-${VERSION}-windows-amd64.zip"
+          gh release download "$TAG" --repo "${GITHUB_REPOSITORY}" --pattern "$ZIP"
+          ZIP_SHA=$(sha256sum "$ZIP" | awk '{print $1}')
+          echo "zip_sha256=$ZIP_SHA" >> "$GITHUB_OUTPUT"
+          echo "zip sha256: $ZIP_SHA"
+
+      - name: Validate bump token
+        env:
+          PACKAGE_MANAGER_BUMP_TOKEN: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PACKAGE_MANAGER_BUMP_TOKEN}" ]; then
+            echo "::error::PACKAGE_MANAGER_BUMP_TOKEN is required to push the Scoop manifest update."
+            exit 1
+          fi
+
+      - name: Checkout scoop-bucket
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/scoop-bucket
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: bucket
+
+      - name: Update and push Scoop manifest
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP_SHA: ${{ steps.sha.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          python3 <<'PY'
+          import json, os, pathlib
+          v   = os.environ["VERSION"]
+          sha = os.environ["ZIP_SHA"]
+          url = f"https://github.com/leaker/wincron/releases/download/v{v}/wincron-{v}-windows-amd64.zip"
+          manifest = {
+              "version": v,
+              "description": "A cron-style scheduler for Windows services (run under nssm)",
+              "homepage": "https://github.com/leaker/wincron",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {"url": url, "hash": sha},
+              },
+              "bin": "wincron.exe",
+              "checkver": {"github": "https://github.com/leaker/wincron"},
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/leaker/wincron/releases/download/v$version/wincron-$version-windows-amd64.zip",
+                      },
+                  },
+              },
+          }
+          pathlib.Path("bucket/wincron.json").write_text(json.dumps(manifest, indent=4) + "\n")
+          PY
+          git add bucket/wincron.json
+          if git diff --cached --quiet; then
+            echo "Scoop manifest already at ${VERSION} -- nothing to push."
+            exit 0
+          fi
+          git --no-pager diff --cached bucket/wincron.json
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -m "wincron: bump to ${VERSION}"
+          git push origin HEAD:main

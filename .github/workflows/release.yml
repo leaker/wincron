@@ -1,0 +1,212 @@
+# =============================================================================
+# Release pipeline.
+#
+# Trigger
+# -------
+#   - push of a tag matching `v*` (e.g. v0.1.0, v1.2.3, v1.2.3-rc1):
+#       build the Windows binary, package a zip, publish a GitHub Release with
+#       the zip + checksums attached, then push an updated Scoop manifest to
+#       leaker/scoop-bucket.
+#   - workflow_dispatch: build + package only (no Release, no Scoop bump). Use
+#       it to smoke-test the build path without cutting a tag.
+#
+# <version> is the tag with the leading `v` stripped (so `v1.2.3` -> `1.2.3`,
+# `v1.2.3-rc1` -> `1.2.3-rc1`). Pre-release tags (`-rc`, `-beta`, `-alpha`) are
+# published as GitHub prereleases and deliberately SKIP the Scoop bump, so a
+# beta never displaces the stable version in `scoop update`.
+#
+# Cross-repo push needs a PAT, not GITHUB_TOKEN
+# ---------------------------------------------
+# The default GITHUB_TOKEN is scoped to this repo only. Pushing the manifest
+# into leaker/scoop-bucket requires a Personal Access Token stored as the
+# `PACKAGE_MANAGER_BUMP_TOKEN` secret. See RELEASING.md for setup.
+#
+# Workflow-injection hardening
+# ----------------------------
+# Every value taken from the event context (tag name, version) enters shell
+# steps through `env:` and is dereferenced as a quoted shell variable. We never
+# inline `${{ github.* }}` into a `run:` body.
+# =============================================================================
+
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+# Read-only by default; the PAT carries write access to the downstream repo,
+# and GITHUB_TOKEN needs `contents: write` only to create the Release.
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build, release and bump Scoop
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+
+      # Build broken code should never reach a Release. This runs the
+      # platform-independent suite on Linux; the Windows-specific cmd /C path
+      # is covered by ci.yml on pull requests.
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      # ----------------------------------------------------------------------
+      # Resolve version + release classification from the ref.
+      #   version  -> tag without the leading `v`, or a dev string on dispatch
+      #   is_tag   -> true when triggered by a v* tag (gates the Release)
+      #   stable   -> true for a v* tag with no -rc/-beta/-alpha suffix
+      #               (gates the Scoop bump)
+      # ----------------------------------------------------------------------
+      - name: Resolve version
+        id: meta
+        env:
+          REF: ${{ github.ref }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if [[ "$REF" == refs/tags/v* ]]; then
+            IS_TAG=true
+            VERSION="${REF_NAME#v}"
+          else
+            IS_TAG=false
+            VERSION="0.0.0-dev+${GITHUB_SHA::7}"
+          fi
+          STABLE=false
+          if [[ "$IS_TAG" == true && "$VERSION" != *-rc* && "$VERSION" != *-beta* && "$VERSION" != *-alpha* ]]; then
+            STABLE=true
+          fi
+          {
+            echo "version=$VERSION"
+            echo "is_tag=$IS_TAG"
+            echo "stable=$STABLE"
+          } >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION is_tag=$IS_TAG stable=$STABLE"
+
+      - name: Build and package
+        id: pkg
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p build dist
+          GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o build/wincron.exe .
+          cp README.md LICENSE crontab.example.txt build/
+
+          ZIP="wincron-${VERSION}-windows-amd64.zip"
+          ( cd build && zip -9 "../dist/${ZIP}" wincron.exe README.md LICENSE crontab.example.txt )
+
+          ( cd dist && sha256sum "${ZIP}" | tee "wincron-${VERSION}-checksums.txt" )
+          ZIP_SHA=$(sha256sum "dist/${ZIP}" | awk '{print $1}')
+          echo "zip_sha256=$ZIP_SHA" >> "$GITHUB_OUTPUT"
+          ls -la dist
+
+      # ----------------------------------------------------------------------
+      # Publish the GitHub Release (tag pushes only). The body is prepended to
+      # GitHub's auto-generated changelog.
+      # ----------------------------------------------------------------------
+      - name: Publish GitHub Release
+        if: ${{ steps.meta.outputs.is_tag == 'true' }}
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          draft: false
+          prerelease: ${{ steps.meta.outputs.stable == 'false' }}
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          body: |
+            ## Install (Windows)
+
+            ```
+            scoop bucket add leaker https://github.com/leaker/scoop-bucket
+            scoop install wincron
+            ```
+
+            Or download `wincron-*-windows-amd64.zip` below and extract `wincron.exe`.
+
+            See the [README](https://github.com/leaker/wincron#install) for how to register it as a service with nssm.
+          files: |
+            dist/wincron-*-windows-amd64.zip
+            dist/wincron-*-checksums.txt
+
+      # ----------------------------------------------------------------------
+      # Scoop manifest bump (stable tags only).
+      #
+      # The manifest is generated in full from the template below, so the first
+      # release seeds bucket/wincron.json and later releases keep it consistent.
+      # `git add` + `git diff --cached` makes this work for both a brand-new
+      # file and an update, and makes a re-run against an already-bumped tag a
+      # no-op instead of an empty commit.
+      # ----------------------------------------------------------------------
+      - name: Validate bump token
+        if: ${{ steps.meta.outputs.stable == 'true' }}
+        env:
+          PACKAGE_MANAGER_BUMP_TOKEN: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${PACKAGE_MANAGER_BUMP_TOKEN}" ]; then
+            echo "::error::PACKAGE_MANAGER_BUMP_TOKEN is required to push the Scoop manifest update."
+            exit 1
+          fi
+
+      - name: Checkout scoop-bucket
+        if: ${{ steps.meta.outputs.stable == 'true' }}
+        uses: actions/checkout@v4
+        with:
+          repository: leaker/scoop-bucket
+          token: ${{ secrets.PACKAGE_MANAGER_BUMP_TOKEN }}
+          path: bucket
+
+      - name: Update and push Scoop manifest
+        if: ${{ steps.meta.outputs.stable == 'true' }}
+        env:
+          VERSION: ${{ steps.meta.outputs.version }}
+          ZIP_SHA: ${{ steps.pkg.outputs.zip_sha256 }}
+        run: |
+          set -euo pipefail
+          cd bucket
+          python3 <<'PY'
+          import json, os, pathlib
+          v   = os.environ["VERSION"]
+          sha = os.environ["ZIP_SHA"]
+          url = f"https://github.com/leaker/wincron/releases/download/v{v}/wincron-{v}-windows-amd64.zip"
+          manifest = {
+              "version": v,
+              "description": "A cron-style scheduler for Windows services (run under nssm)",
+              "homepage": "https://github.com/leaker/wincron",
+              "license": "MIT",
+              "architecture": {
+                  "64bit": {"url": url, "hash": sha},
+              },
+              "bin": "wincron.exe",
+              "checkver": {"github": "https://github.com/leaker/wincron"},
+              "autoupdate": {
+                  "architecture": {
+                      "64bit": {
+                          "url": "https://github.com/leaker/wincron/releases/download/v$version/wincron-$version-windows-amd64.zip",
+                      },
+                  },
+              },
+          }
+          pathlib.Path("bucket/wincron.json").write_text(json.dumps(manifest, indent=4) + "\n")
+          PY
+          git add bucket/wincron.json
+          if git diff --cached --quiet; then
+            echo "Scoop manifest already at ${VERSION} -- nothing to push."
+            exit 0
+          fi
+          git --no-pager diff --cached bucket/wincron.json
+          git -c user.name="leaker[bot]" -c user.email="claude@leelib.com" \
+            commit -m "wincron: bump to ${VERSION}"
+          git push origin HEAD:main
