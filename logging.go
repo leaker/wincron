@@ -18,16 +18,18 @@ type logConfig struct {
 }
 
 // newLogger writes to both stdout (so nssm/console can capture it) and a
-// size-rotated file.
-func newLogger(cfg logConfig) *log.Logger {
+// size-rotated file. The returned io.Closer releases the open log-file handle;
+// the caller must Close it on shutdown (required on Windows, where an open
+// handle blocks deletion/rotation of the file).
+func newLogger(cfg logConfig) (*log.Logger, io.Closer) {
 	return buildLogger(cfg, os.Stdout)
 }
 
 // buildLogger is the testable core of newLogger: it sends output to the given
 // console writer plus a size-rotated file. The returned logger is safe for
 // concurrent use because the standard log.Logger serialises writes with its own
-// mutex.
-func buildLogger(cfg logConfig, console io.Writer) *log.Logger {
+// mutex. The returned io.Closer is the underlying rotator.
+func buildLogger(cfg logConfig, console io.Writer) (*log.Logger, io.Closer) {
 	rotator := &lumberjack.Logger{
 		Filename:   cfg.path,
 		MaxSize:    cfg.maxSizeMB,
@@ -36,5 +38,5 @@ func buildLogger(cfg logConfig, console io.Writer) *log.Logger {
 		Compress:   cfg.compress,
 	}
 	w := io.MultiWriter(console, rotator)
-	return log.New(w, "", log.LstdFlags|log.Lmsgprefix)
+	return log.New(w, "", log.LstdFlags|log.Lmsgprefix), rotator
 }

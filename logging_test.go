@@ -14,7 +14,10 @@ func TestLoggerWritesFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "wincron.log")
 
-	logger := buildLogger(logConfig{path: path, maxSizeMB: 10, maxBackups: 3, maxAgeDays: 30}, io.Discard)
+	logger, closer := buildLogger(logConfig{path: path, maxSizeMB: 10, maxBackups: 3, maxAgeDays: 30}, io.Discard)
+	// Close before the test returns so the OS releases the file handle; on
+	// Windows an open handle blocks t.TempDir's RemoveAll cleanup.
+	defer closer.Close()
 	logger.Printf("hello from the file writer")
 
 	data, err := os.ReadFile(path)
@@ -34,7 +37,8 @@ func TestLoggerRotates(t *testing.T) {
 
 	// maxSizeMB=1 → rotate after ~1MB. Each line below is ~100 bytes, so ~25k
 	// lines comfortably crosses two rotations.
-	logger := buildLogger(logConfig{path: path, maxSizeMB: 1, maxBackups: 5, maxAgeDays: 0, compress: false}, io.Discard)
+	logger, closer := buildLogger(logConfig{path: path, maxSizeMB: 1, maxBackups: 5, maxAgeDays: 0, compress: false}, io.Discard)
+	defer closer.Close()
 	line := strings.Repeat("x", 90)
 	for i := 0; i < 25000; i++ {
 		logger.Println(line)

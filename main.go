@@ -47,13 +47,14 @@ func main() {
 		logPath = filepath.Join(baseDir, "wincron.log")
 	}
 
-	logger := newLogger(logConfig{
+	logger, logCloser := newLogger(logConfig{
 		path:       logPath,
 		maxSizeMB:  maxSizeMB,
 		maxBackups: maxBackups,
 		maxAgeDays: maxAgeDays,
 		compress:   compress,
 	})
+	defer logCloser.Close()
 
 	loc, err := loadLocation(tz)
 	if err != nil {
