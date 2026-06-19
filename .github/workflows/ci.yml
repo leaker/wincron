@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ ubuntu-latest, windows-latest, macos-latest ]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          check-latest: true
+      - name: Vet
+        run: go vet ./...
+      # On Linux/macOS run with the race detector. On Windows run the plain
+      # suite — crucially this exercises the real `cmd /C` execution path in
+      # runner_windows.go, which cannot be tested when developing on macOS.
+      - name: Test (race detector)
+        if: runner.os != 'Windows'
+        run: go test -race ./...
+      - name: Test
+        if: runner.os == 'Windows'
+        run: go test ./...
+
+  format:
+    name: gofmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Check formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+  build-windows:
+    name: build windows artifacts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build windows/amd64
+        run: GOOS=windows GOARCH=amd64 go build -o dist/wincron.exe .
+      - name: Build windows/386
+        run: GOOS=windows GOARCH=386 go build -o dist/wincron-386.exe .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wincron-windows
+          path: dist/*.exe
+          if-no-files-found: error
