@@ -30,3 +30,12 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# wincron build output and runtime artifacts
+/wincron
+/wincron.exe
+wincron.log
+wincron-*.log
+wincron-*.log.gz
+# The live crontab is environment-specific; ship crontab.example.txt instead.
+/crontab.txt
