@@ -32,6 +32,7 @@ go.work.sum
 # .vscode/
 
 # wincron build output and runtime artifacts
+/dist/
 /wincron
 /wincron.exe
 wincron.log
